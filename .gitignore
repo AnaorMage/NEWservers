@@ -1,0 +1,14 @@
+# Сборка и бинарники
+build/
+dist/
+*.exe
+*.spec
+
+# Файлы Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Данные пользователей
+attachments/

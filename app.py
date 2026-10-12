@@ -3,6 +3,7 @@ import json
 import re
 import sys
 import uuid
+import configparser
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -22,16 +23,41 @@ else:
 
 app.config['SECRET_KEY'] = 'server-inventory-secret-key-change-me'
 
-
 ATTACHMENTS_DIR = os.path.join(BASE_DIR, 'attachments')
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
-#PostgreSQL
-DB_HOST = "127.0.0.1"
-DB_NAME = "SERVERS"
-DB_USER = "postgres"
-DB_PASS = "arnold001"
-DB_PORT = "5432"
+# --- ЧТЕНИЕ КОНФИГУРАЦИИ ИЗ config.ini ---
+CONFIG_FILE = os.path.join(BASE_DIR, 'config.ini')
+config = configparser.ConfigParser()
+
+if not os.path.exists(CONFIG_FILE):
+    config['database'] = {
+        'host': '127.0.0.1',
+        'port': '5432',
+        'dbname': 'SERVERS',
+        'user': 'postgres',
+        'password': 'postgres'
+    }
+    config['ai'] = {
+        'ollama_url': 'http://127.0.0.1:11434/api/generate',
+        'ollama_model': 'qwen2.5:1.5b'
+    }
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            config.write(f)
+    except Exception:
+        pass
+else:
+    config.read(CONFIG_FILE, encoding='utf-8')
+
+DB_HOST = config.get('database', 'host', fallback='127.0.0.1')
+DB_PORT = config.get('database', 'port', fallback='5432')
+DB_NAME = config.get('database', 'dbname', fallback='SERVERS')
+DB_USER = config.get('database', 'user', fallback='postgres')
+DB_PASS = config.get('database', 'password', fallback='postgres')
+
+OLLAMA_URL = config.get('ai', 'ollama_url', fallback='http://127.0.0.1:11434/api/generate')
+OLLAMA_MODEL = config.get('ai', 'ollama_model', fallback='qwen2.5:1.5b')
 
 # Разрешенные поля сортировки таблицы серверов
 SORT_COLUMNS = {
@@ -88,7 +114,7 @@ def has_column(cur, table, column):
     return cur.fetchone() is not None
 
 
-#ИИ-помощник
+# --- ИИ-ПОМОЩНИК ---
 
 IP_PATTERN = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
 
@@ -197,11 +223,6 @@ def ai_analyze():
     }
     return jsonify({'findings': findings, 'summary': summary})
 
-#Ollama
-
-OLLAMA_URL = 'http://127.0.0.1:11434/api/generate'
-OLLAMA_MODEL = 'qwen2.5:1.5b'
-
 
 def ask_local_ai(prompt, timeout=90):
     payload = json.dumps({
@@ -245,7 +266,7 @@ def ai_explain():
         return jsonify({'text': text})
     except urllib.error.URLError:
         return jsonify({
-            'error': f'Не удалось подключиться к Ollama на 127.0.0.1:11434. '
+            'error': f'Не удалось подключиться к Ollama на {OLLAMA_URL}. '
                      f'Убедитесь, что приложение Ollama запущено и модель загружена '
                      f'(в командной строке: ollama pull {OLLAMA_MODEL}).'
         }), 503
@@ -258,7 +279,6 @@ def index():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # --- Сортировка ---
     sort = request.args.get('sort', 'id')
     order = request.args.get('order', 'desc')
     if sort not in SORT_COLUMNS:
@@ -270,9 +290,8 @@ def index():
     has_archive = has_column(cur, 'servers', 'is_archived')
     archive_where = 'WHERE s.is_archived = FALSE' if has_archive else ''
     if not has_archive:
-        flash('Внимание: не выполнена миграция архива (migration_add_archive.sql). Функция архива недоступна.', 'error')
+        flash('Внимание: не выполнена миграция архива (schema.sql). Функция архива недоступна.', 'error')
 
-    # Загрузка всех серверов + агрегированный список кодов потребностей
     try:
         cur.execute(f'''
             SELECT
@@ -301,7 +320,7 @@ def index():
                 s.id, s.name AS server_name, s.ip_address, s.dbms_version, NULL AS launch_year,
                 s.cpu_cores, s.ram_gb, s.disk_gb, s.is_id,
                 isys.name AS is_name, sr.name AS role_name, os.name AS os_name, env.name AS env_name,
-                s.requirement_code AS requirement_codes
+                NULL AS requirement_codes
             FROM servers s
             LEFT JOIN information_systems isys ON s.is_id = isys.id
             LEFT JOIN server_roles sr ON s.server_role_id = sr.id
@@ -311,9 +330,8 @@ def index():
             ORDER BY s.id DESC;
         ''')
         servers = cur.fetchall()
-        flash('Внимание: не выполнена миграция БД (requirements/launch_year). Часть функций недоступна.', 'error')
+        flash('Внимание: проверьте структуру БД через schema.sql.', 'error')
 
-    # Количество комментариев к каждому серверу
     comment_counts = {}
     try:
         cur.execute('SELECT server_id, COUNT(*) AS cnt FROM comments GROUP BY server_id;')
@@ -321,7 +339,6 @@ def index():
     except Exception:
         conn.rollback()
 
-    # Количество прикреплённых файлов к каждому серверу
     attachment_counts = {}
     try:
         cur.execute('SELECT server_id, COUNT(*) AS cnt FROM attachments GROUP BY server_id;')
@@ -329,7 +346,6 @@ def index():
     except Exception:
         conn.rollback()
 
-    # Количество версий в истории изменений каждого сервера
     history_counts = {}
     try:
         cur.execute('SELECT server_id, COUNT(*) AS cnt FROM server_history GROUP BY server_id;')
@@ -337,7 +353,6 @@ def index():
     except Exception:
         conn.rollback()
 
-    # Расчет
     for s in servers:
         cpu = s['cpu_cores'] or 0
         ram = s['ram_gb'] or 0
@@ -348,7 +363,6 @@ def index():
         s['attachment_count'] = attachment_counts.get(s['id'], 0)
         s['history_count'] = history_counts.get(s['id'], 0)
 
-    #Суммарная аналитика
     cur.execute('''
         SELECT
             COUNT(*) AS total_servers,
@@ -359,7 +373,6 @@ def index():
     ''')
     totals = cur.fetchone()
 
-    # Выпадающие списки / справочники
     cur.execute('SELECT id, name FROM operating_systems ORDER BY name;')
     os_list = cur.fetchall()
     cur.execute('SELECT id, name FROM environments ORDER BY name;')
@@ -413,7 +426,6 @@ def add_server():
     requirement_ids = [clean_int(v) for v in request.form.getlist('requirement_ids')]
     requirement_ids = [r for r in requirement_ids if r]
 
-
     is_name = (request.form.get('is_name') or '').strip()
     new_is_code = (request.form.get('new_is_code') or '').strip() or None
     if is_name:
@@ -428,7 +440,6 @@ def add_server():
             )
             is_id = cur.fetchone()['id']
 
-    # Новая потребность
     new_requirement_code = (request.form.get('new_requirement_code') or '').strip()
     if new_requirement_code:
         cur.execute('SELECT id FROM requirements WHERE code = %s;', (new_requirement_code,))
@@ -482,14 +493,12 @@ def delete_server(id):
         else:
             cur.execute('DELETE FROM servers WHERE id = %s;', (id,))
             conn.commit()
-            flash('Сервер удален (архив не настроен — выполните миграцию).', 'success')
+            flash('Сервер удален.', 'success')
     finally:
         cur.close()
         conn.close()
     return redirect(url_for('index'))
 
-
-#архив
 
 @app.route('/archive/page')
 def archive_page():
@@ -527,7 +536,7 @@ def archive_page():
         servers = cur.fetchall()
     except Exception:
         conn.rollback()
-        flash('Внимание: архив недоступен — выполните migration_add_archive.sql.', 'error')
+        flash('Внимание: архив недоступен — проверьте schema.sql.', 'error')
         servers = []
 
     comment_counts = {}
@@ -618,8 +627,6 @@ def delete_from_archive(id):
     return redirect(url_for('archive_page'))
 
 
-# Группировка таблиц
-
 @app.route('/servers/grouped')
 def servers_grouped():
     by = request.args.get('by', 'requirement')
@@ -675,8 +682,6 @@ def servers_grouped():
     return jsonify(rows)
 
 
-#Редактирование
-
 @app.route('/server/<int:server_id>/edit', methods=['GET', 'POST'])
 def edit_server(server_id):
     conn = get_db_connection()
@@ -705,7 +710,6 @@ def edit_server(server_id):
         conn.close()
         return jsonify(server)
 
-    # POST — сохранение изменений
     name = request.form.get('name')
     ip_address = request.form.get('ip_address')
     dbms_version = request.form.get('dbms_version') or None
@@ -723,7 +727,6 @@ def edit_server(server_id):
     requirement_ids = [clean_int(v) for v in request.form.getlist('requirement_ids')]
     requirement_ids = [r for r in requirement_ids if r]
 
-    # сохранение состояния сервера
     try:
         cur.execute('''
             SELECT
@@ -819,8 +822,6 @@ def get_server_history(server_id):
     return jsonify(history)
 
 
-# Справочники
-
 @app.route('/ref/add/<table_name>', methods=['POST'])
 def add_reference_item(table_name):
     if table_name not in ALLOWED_REF_TABLES:
@@ -907,8 +908,6 @@ def delete_reference_item(table_name, item_id):
     return redirect(url_for('index'))
 
 
-# Привязка 
-
 @app.route('/requirement/<int:requirement_id>/servers')
 def get_requirement_servers(requirement_id):
     conn = get_db_connection()
@@ -969,7 +968,6 @@ def detach_server_from_requirement(requirement_id, server_id):
     if is_ajax():
         return jsonify({'status': 'ok'})
     return redirect(url_for('index'))
-
 
 
 @app.route('/requirement/<int:requirement_id>/is')
@@ -1110,8 +1108,6 @@ def detach_requirement_from_is(is_id, requirement_id):
     return redirect(url_for('index'))
 
 
-# Привязка
-
 @app.route('/is/<int:is_id>/servers')
 def get_is_servers(is_id):
     conn = get_db_connection()
@@ -1154,8 +1150,6 @@ def detach_server_from_is(is_id, server_id):
         return jsonify({'status': 'ok'})
     return redirect(url_for('index'))
 
-
-# Комментарии
 
 @app.route('/server/<int:server_id>/comments')
 def get_comments(server_id):
@@ -1238,8 +1232,6 @@ def search_comments():
     return jsonify(results)
 
 
-# документы
-
 @app.route('/server/<int:server_id>/attachments')
 def get_attachments(server_id):
     conn = get_db_connection()
@@ -1295,7 +1287,7 @@ def upload_attachment(server_id):
         except OSError:
             pass
         if is_ajax():
-            return jsonify({'error': f'Ошибка сохранения (выполнена ли миграция вложений?): {e}'}), 500
+            return jsonify({'error': f'Ошибка сохранения: {e}'}), 500
         flash(f'Ошибка сохранения файла: {e}', 'error')
         return redirect(url_for('index'))
 
